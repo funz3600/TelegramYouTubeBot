@@ -10,11 +10,13 @@ GOOGLE_CLIENT_SECRETS_FILE = "61481650487-83cot93su80e39ik9dgakfj3msggj1tc.apps.
 
 app = Flask(__name__)
 
-@app.route("/", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    application.update_queue.put(update)
-    return "OK"
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Handle incoming updates from Telegram."""
+    if telegram_app:
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        await telegram_app.process_update(update)
+    return 'ok'
 
 def start(update, context):
     update.message.reply_text("Hello! I am your bot.")
