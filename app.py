@@ -22,14 +22,30 @@ GOOGLE_CLIENT_SECRETS_FILE = "client_secrets.json"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ============================================
+# FLASK APP INITIALIZATION
+# ============================================
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret")
 
-# Initialize Telegram bot at module level
+# ============================================
+# TELEGRAM APPLICATION (with initialization)
+# ============================================
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+_app_initialized = False
+_init_lock = asyncio.Lock()
+
+async def ensure_initialized():
+    global _app_initialized
+    async with _init_lock:
+        if not _app_initialized:
+            await telegram_app.initialize()
+            _app_initialized = True
+            logger.info("Telegram application initialized")
+
 # ============================================
-# DATABASE FUNCTIONS (with timeout)
+# DATABASE FUNCTIONS
 # ============================================
 def init_db():
     conn = sqlite3.connect('users.db', timeout=10)
@@ -80,7 +96,7 @@ def get_all_users():
 init_db()
 
 # ============================================
-# OAUTH HELPER
+# GOOGLE OAUTH HELPERS
 # ============================================
 def get_google_auth_url(telegram_id):
     flow = Flow.from_client_secrets_file(
@@ -97,66 +113,7 @@ def get_google_auth_url(telegram_id):
     return auth_url
 
 # ============================================
-# FLASK ROUTES
-# ============================================
-@app.route('/')
-def index():
-    return "Telegram YouTube Bot is running!"
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        await telegram_app.process_update(update)
-    except Exception as e:
-        logger.error(f"Error processing update: {e}", exc_info=True)
-    return 'ok'
-
-@app.route('/callback')
-def google_callback():
-    state = request.args.get('state')
-    if not state:
-        return "<h1>Error</h1><p>No state parameter.</p>", 400
-    try:
-        telegram_id = int(state)
-    except ValueError:
-        return "<h1>Error</h1><p>Invalid state.</p>", 400
-
-    flow = Flow.from_client_secrets_file(
-        GOOGLE_CLIENT_SECRETS_FILE,
-        scopes=['https://www.googleapis.com/auth/youtube.force-ssl'],
-        redirect_uri=f"{YOUR_APP_URL}/callback"
-    )
-    flow.fetch_token(authorization_response=request.url)
-    credentials = flow.credentials
-
-    try:
-        youtube = build('youtube', 'v3', credentials=credentials)
-        resp = youtube.channels().list(part="snippet", mine=True).execute()
-        if resp['items']:
-            channel_id = resp['items'][0]['id']
-            channel_title = resp['items'][0]['snippet']['title']
-            add_or_update_user(telegram_id, credentials, channel_id, channel_title)
-
-            # Send Telegram message using a new event loop
-            async def send_msg():
-                await telegram_app.bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"✅ YouTube account '{channel_title}' connected successfully!"
-                )
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(send_msg())
-
-            return "<h1>Success!</h1><p>YouTube connected. Return to Telegram.</p>"
-        else:
-            return "<h1>Error</h1><p>No YouTube channel found.</p>", 400
-    except Exception as e:
-        logger.error(f"Callback error: {e}", exc_info=True)
-        return "<h1>Error</h1><p>Something went wrong.</p>", 500
-
-# ============================================
-# TELEGRAM HANDLERS
+# TELEGRAM BOT HANDLERS
 # ============================================
 async def start(update: Update, context):
     user = update.effective_user
@@ -217,5 +174,76 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("channels", channels))
 telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
+# ============================================
+# FLASK ROUTES
+# ============================================
+@app.route('/')
+def index():
+    return "Telegram YouTube Bot is running!"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Synchronous webhook that processes Telegram updates."""
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    
+    async def process():
+        await ensure_initialized()
+        await telegram_app.process_update(update)
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.run(process())
+        else:
+            loop.run_until_complete(process())
+    except RuntimeError:
+        asyncio.run(process())
+    
+    return 'ok'
+
+@app.route('/callback')
+def google_callback():
+    state = request.args.get('state')
+    if not state:
+        return "<h1>Error</h1><p>No state parameter.</p>", 400
+    try:
+        telegram_id = int(state)
+    except ValueError:
+        return "<h1>Error</h1><p>Invalid state.</p>", 400
+
+    flow = Flow.from_client_secrets_file(
+        GOOGLE_CLIENT_SECRETS_FILE,
+        scopes=['https://www.googleapis.com/auth/youtube.force-ssl'],
+        redirect_uri=f"{YOUR_APP_URL}/callback"
+    )
+    flow.fetch_token(authorization_response=request.url)
+    credentials = flow.credentials
+
+    try:
+        youtube = build('youtube', 'v3', credentials=credentials)
+        resp = youtube.channels().list(part="snippet", mine=True).execute()
+        if resp['items']:
+            channel_id = resp['items'][0]['id']
+            channel_title = resp['items'][0]['snippet']['title']
+            add_or_update_user(telegram_id, credentials, channel_id, channel_title)
+
+            # Send confirmation to Telegram
+            async def send_msg():
+                await telegram_app.bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"✅ YouTube account '{channel_title}' connected successfully!"
+                )
+            asyncio.run(send_msg())
+
+            return "<h1>Success!</h1><p>YouTube connected. Return to Telegram.</p>"
+        else:
+            return "<h1>Error</h1><p>No YouTube channel found.</p>", 400
+    except Exception as e:
+        logger.error(f"Callback error: {e}", exc_info=True)
+        return "<h1>Error</h1><p>Something went wrong.</p>", 500
+
+# ============================================
+# MAIN (for local development)
+# ============================================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
