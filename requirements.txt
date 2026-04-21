@@ -1,5 +1,17 @@
-Flask[async]==3.0.3
-python-telegram-bot==21.3
-google-auth-oauthlib==1.2.0
-google-api-python-client==2.127.0
-gunicorn==22.0.0
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=4)
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Synchronous webhook that runs async PTB processing in a thread-safe event loop."""
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    
+    def run_coro():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.process_update(update))
+    
+    executor.submit(run_coro)
+    return 'ok'
