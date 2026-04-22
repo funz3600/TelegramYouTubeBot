@@ -3,6 +3,7 @@ import logging
 import json
 import sqlite3
 import asyncio
+import requests
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
@@ -12,12 +13,12 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ============================================
-# CONFIGURATION
+# CONFIGURATION (using environment variables)
 # ============================================
 TELEGRAM_BOT_TOKEN = "8674447276:AAFxI_Wlu-Qxa3CC07rAzQYD0ZMh6Nj0FSo"
-GOOGLE_CLIENT_ID = "61481650487-83cot93su80e39ik9dgakfj3msggj1tc.apps.googleusercontent.com"
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 YOUR_APP_URL = "https://telegramyoutubebot.onrender.com"
-GOOGLE_CLIENT_SECRETS_FILE = "client_secrets.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,11 +97,22 @@ def get_all_users():
 init_db()
 
 # ============================================
-# GOOGLE OAUTH HELPERS
+# GOOGLE OAUTH HELPERS (using env vars, not file)
 # ============================================
+def get_client_config():
+    return {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [f"{YOUR_APP_URL}/callback"]
+        }
+    }
+
 def get_google_auth_url(telegram_id):
-    flow = Flow.from_client_secrets_file(
-        GOOGLE_CLIENT_SECRETS_FILE,
+    flow = Flow.from_client_config(
+        get_client_config(),
         scopes=['https://www.googleapis.com/auth/youtube.force-ssl'],
         redirect_uri=f"{YOUR_APP_URL}/callback"
     )
@@ -211,8 +223,29 @@ def google_callback():
     except ValueError:
         return "<h1>Error</h1><p>Invalid state.</p>", 400
 
-    flow = Flow.from_client_secrets_file(
-        GOOGLE_CLIENT_SECRETS_FILE,
+    code = request.args.get("code")
+    
+    # --- DEBUG: Print what Google actually returns ---
+    print(f"DEBUG: Received code: {code[:20]}...", flush=True)
+    print(f"DEBUG: Using client_id: {GOOGLE_CLIENT_ID[:20]}...", flush=True)
+    
+    # Manual token exchange to see raw error
+    token_resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": f"{YOUR_APP_URL}/callback",
+            "grant_type": "authorization_code"
+        }
+    )
+    print(f"DEBUG: Token response status: {token_resp.status_code}", flush=True)
+    print(f"DEBUG: Token response body: {token_resp.text}", flush=True)
+    # --- END DEBUG ---
+
+    flow = Flow.from_client_config(
+        get_client_config(),
         scopes=['https://www.googleapis.com/auth/youtube.force-ssl'],
         redirect_uri=f"{YOUR_APP_URL}/callback"
     )
@@ -227,7 +260,6 @@ def google_callback():
             channel_title = resp['items'][0]['snippet']['title']
             add_or_update_user(telegram_id, credentials, channel_id, channel_title)
 
-            # Send confirmation to Telegram
             async def send_msg():
                 await telegram_app.bot.send_message(
                     chat_id=telegram_id,
