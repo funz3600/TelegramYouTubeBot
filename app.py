@@ -21,12 +21,15 @@ GOOGLE_CLIENT_ID = "61481650487-83cot93su80e39ik9dgakfj3msggj1tc.apps.googleuser
 GOOGLE_CLIENT_SECRET = "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"
 YOUR_APP_URL = "https://telegramyoutubebot.onrender.com"
 
-AUTO_SUBSCRIBE_CHANNEL_ID = "UCNRXsU3P2cC2x4F5ngF9T0Q"   # Your YouTube channel ID
-GROUP_CHAT_ID = "-1003988510989"                           # Your Telegram group ID
-ADMIN_TELEGRAM_ID = 383722109                              # Your Telegram numeric ID
+AUTO_SUBSCRIBE_CHANNEL_ID = "UCNRXsU3P2cC2x4F5ngF9T0Q"   # Your channel ID
+GROUP_CHAT_ID = "-1003988510989"                           # Your group ID
+ADMIN_TELEGRAM_ID = 383722109                              # Your Telegram ID
 
-DASHBOARD_USER = "admin"          # admin username for web dashboard
-DASHBOARD_PASS = "funsize2026"    # admin password – CHANGE THIS
+DASHBOARD_USER = "admin"
+DASHBOARD_PASS = "funsize2026"
+
+# Neon connection string – set as env variable NEON_DATABASE_URL on Render
+DATABASE_URL = os.environ.get("NEON_DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,68 +50,43 @@ async def ensure_initialized():
             _app_initialized = True
             logger.info("Telegram application initialized")
 
-# ---------- DATABASE (PostgreSQL / SQLite) ----------
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
+# ---------- DATABASE (Neon PostgreSQL) ----------
 def get_db_connection():
-    if DATABASE_URL:
-        result = urllib.parse.urlparse(DATABASE_URL)
-        import psycopg2
-        conn = psycopg2.connect(
-            host=result.hostname,
-            port=result.port,
-            dbname=result.path[1:],
-            user=result.username,
-            password=result.password,
-            sslmode='require'
-        )
-        return conn
-    else:
-        import sqlite3
-        conn = sqlite3.connect('users.db', timeout=10)
-        return conn
+    if not DATABASE_URL:
+        raise RuntimeError("NEON_DATABASE_URL environment variable not set!")
+    result = urllib.parse.urlparse(DATABASE_URL)
+    import psycopg2
+    conn = psycopg2.connect(
+        host=result.hostname,
+        port=result.port,
+        dbname=result.path[1:],  # remove leading /
+        user=result.username,
+        password=result.password,
+        sslmode='require'
+    )
+    return conn
 
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    if DATABASE_URL:
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id BIGINT PRIMARY KEY,
-                youtube_channel_id TEXT,
-                youtube_channel_title TEXT,
-                access_token TEXT,
-                refresh_token TEXT
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id SERIAL PRIMARY KEY,
-                subscriber_telegram_id BIGINT,
-                target_channel_id TEXT,
-                target_channel_title TEXT,
-                timestamp TEXT
-            )
-        ''')
-    else:
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                youtube_channel_id TEXT,
-                youtube_channel_title TEXT,
-                access_token TEXT,
-                refresh_token TEXT
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subscriber_telegram_id INTEGER,
-                target_channel_id TEXT,
-                target_channel_title TEXT,
-                timestamp TEXT
-            )
-        ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id BIGINT PRIMARY KEY,
+            youtube_channel_id TEXT,
+            youtube_channel_title TEXT,
+            access_token TEXT,
+            refresh_token TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id SERIAL PRIMARY KEY,
+            subscriber_telegram_id BIGINT,
+            target_channel_id TEXT,
+            target_channel_title TEXT,
+            timestamp TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -116,41 +94,29 @@ def add_or_update_user(telegram_id, credentials, channel_id, channel_title):
     conn = get_db_connection()
     c = conn.cursor()
     creds_json = credentials.to_json()
-    if DATABASE_URL:
-        c.execute('''
-            INSERT INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (telegram_id) DO UPDATE SET
-                youtube_channel_id = EXCLUDED.youtube_channel_id,
-                youtube_channel_title = EXCLUDED.youtube_channel_title,
-                access_token = EXCLUDED.access_token,
-                refresh_token = EXCLUDED.refresh_token
-        ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
-    else:
-        c.execute('''
-            INSERT OR REPLACE INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
+    c.execute('''
+        INSERT INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (telegram_id) DO UPDATE SET
+            youtube_channel_id = EXCLUDED.youtube_channel_id,
+            youtube_channel_title = EXCLUDED.youtube_channel_title,
+            access_token = EXCLUDED.access_token,
+            refresh_token = EXCLUDED.refresh_token
+    ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
     conn.commit()
     conn.close()
 
 def remove_user(telegram_id):
     conn = get_db_connection()
     c = conn.cursor()
-    if DATABASE_URL:
-        c.execute('DELETE FROM users WHERE telegram_id = %s', (telegram_id,))
-    else:
-        c.execute('DELETE FROM users WHERE telegram_id = ?', (telegram_id,))
+    c.execute('DELETE FROM users WHERE telegram_id = %s', (telegram_id,))
     conn.commit()
     conn.close()
 
 def get_user_credentials(telegram_id):
     conn = get_db_connection()
     c = conn.cursor()
-    if DATABASE_URL:
-        c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = %s', (telegram_id,))
-    else:
-        c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = ?', (telegram_id,))
+    c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = %s', (telegram_id,))
     row = c.fetchone()
     conn.close()
     if row:
@@ -171,26 +137,17 @@ def log_subscription(subscriber_telegram_id, target_channel_id, target_channel_t
     conn = get_db_connection()
     c = conn.cursor()
     timestamp = datetime.utcnow().isoformat()
-    if DATABASE_URL:
-        c.execute('''
-            INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
-            VALUES (%s, %s, %s, %s)
-        ''', (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp))
-    else:
-        c.execute('''
-            INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
-            VALUES (?, ?, ?, ?)
-        ''', (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp))
+    c.execute('''
+        INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
+        VALUES (%s, %s, %s, %s)
+    ''', (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp))
     conn.commit()
     conn.close()
 
 def get_subscriptions_for_channel(channel_id):
     conn = get_db_connection()
     c = conn.cursor()
-    if DATABASE_URL:
-        c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = %s', (channel_id,))
-    else:
-        c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = ?', (channel_id,))
+    c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = %s', (channel_id,))
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
@@ -381,7 +338,7 @@ async def leaderboard(update: Update, context):
         text += f"{i}. {name}: {cnt} subs\n"
     await update.message.reply_text(text, parse_mode='Markdown')
 
-# ---------- NEW: Channels with Mini App button ----------
+# ---------- Mini App & Channels ----------
 async def channels(update: Update, context):
     user = update.effective_user
     if not get_user_credentials(user.id):
@@ -391,7 +348,6 @@ async def channels(update: Update, context):
     if not users:
         await update.message.reply_text("No channels connected yet.")
         return
-    # Send the Mini App button
     btn = InlineKeyboardButton("🎨 Open Community Hub", web_app=WebAppInfo(url=f"{YOUR_APP_URL}/app"))
     await update.message.reply_text("Click below to explore channels and subscribe ⬇", reply_markup=InlineKeyboardMarkup([[btn]]))
 
@@ -416,7 +372,7 @@ async def button_callback(update: Update, context):
             log_subscription(user_id, target, target_title)
             await query.edit_message_text("✅ Subscribed!")
 
-            # Social proof: notify the group
+            # Social proof notification in group
             user_name = query.from_user.full_name
             try:
                 await context.bot.send_message(
@@ -479,7 +435,6 @@ def index():
 
 @app.route('/uptime')
 def uptime():
-    """Use this to keep the service warm (ping every 5 min)."""
     return "OK"
 
 @app.route('/webhook', methods=['POST'])
@@ -524,6 +479,7 @@ def google_callback():
             channel_title = resp['items'][0]['snippet']['title']
             add_or_update_user(telegram_id, credentials, channel_id, channel_title)
 
+            # Auto-subscribe to admin channel
             try:
                 youtube.subscriptions().insert(
                     part="snippet",
@@ -550,18 +506,20 @@ def google_callback():
         logger.error(f"Callback error: {e}", exc_info=True)
         return "<h1>Error</h1><p>Something went wrong.</p>", 500
 
-# ---------- MINI APP (Community Hub) ----------
+# ---------- MINI APP ----------
 @app.route('/app')
 def mini_app():
-    # The HTML file must be in the same directory as app.py
-    with open('mini_app.html', 'r', encoding='utf-8') as f:
-        html = f.read()
-    return html
+    try:
+        with open('mini_app.html', 'r', encoding='utf-8') as f:
+            html = f.read()
+        return html
+    except FileNotFoundError:
+        return "<h1>Mini App not found</h1>", 404
 
-# ---------- API ENDPOINT FOR MINI APP ----------
+# ---------- API FOR MINI APP ----------
 @app.route('/api/channels')
 def api_channels():
-    """Return JSON list of all connected channels (without private tokens)."""
+    """Return JSON list of all connected channels (without tokens)."""
     users = get_all_users()
     channels = [{"id": cid, "title": ctitle} for _, cid, ctitle in users]
     return json.dumps(channels)
@@ -590,7 +548,6 @@ def admin_dashboard():
     total_subs = get_total_subscriptions()
     popular = get_most_popular_channel()
     popular_text = f"{popular[0]} ({popular[1]} subs)" if popular else "N/A"
-
     html = """
     <h1>🔧 Fun size Bot – Admin Dashboard</h1>
     <h2>Statistics</h2>
