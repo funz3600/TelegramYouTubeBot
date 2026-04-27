@@ -4,3 +4,4 @@ google-auth-oauthlib==1.2.0
 google-api-python-client==2.127.0
 gunicorn==22.0.0
 asgiref==3.8.1
+psycopg2-binary
