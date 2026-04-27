@@ -16,7 +16,7 @@
         h2 {
             text-align: center;
             color: #e94560;
-            margin-bottom: 10px;
+            margin-bottom: 20px;
         }
         .channel-card {
             background: #16213e;
@@ -43,7 +43,6 @@
             cursor: pointer;
             transition: background 0.3s;
         }
-        button:active { background: #c23152; }
         button.subscribed {
             background: #0f3460;
             cursor: default;
@@ -59,11 +58,9 @@
 <body>
     <h2>🔥 Fun size Community Hub</h2>
     <div id="channel-list" class="loading">Loading channels...</div>
-
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
-
         async function fetchChannels() {
             try {
                 const res = await fetch('/api/channels');
@@ -73,7 +70,6 @@
                 document.getElementById('channel-list').innerHTML = '⚠️ Failed to load channels. Ensure you are connected.';
             }
         }
-
         function render(channels) {
             if (!channels || channels.length === 0) {
                 document.getElementById('channel-list').innerHTML = 'No channels connected yet.';
@@ -90,12 +86,10 @@
             });
             document.getElementById('channel-list').innerHTML = html;
         }
-
         function subscribe(channelId) {
             tg.showConfirm(`Subscribe to this channel?`, (confirmed) => {
                 if (confirmed) {
                     tg.sendData(`sub_${channelId}`);
-                    // Optimistic UI: mark button as subscribed
                     const btn = document.getElementById(`btn-${channelId}`);
                     if (btn) {
                         btn.className = 'subscribed';
@@ -106,7 +100,6 @@
                 }
             });
         }
-
         fetchChannels();
     </script>
 </body>
