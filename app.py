@@ -4,8 +4,9 @@ import json
 import asyncio
 import urllib.parse
 from datetime import datetime
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from functools import wraps
+from flask import Flask, request, Response, render_template_string
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ChatMemberHandler
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -13,21 +14,19 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ============================================
-# CONFIGURATION (ALL YOUR DETAILS)
+# CONFIGURATION
 # ============================================
 TELEGRAM_BOT_TOKEN = "8674447276:AAFxI_Wlu-Qxa3CC07rAzQYD0ZMh6Nj0FSo"
 GOOGLE_CLIENT_ID = "61481650487-83cot93su80e39ik9dgakfj3msggj1tc.apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET = "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"
 YOUR_APP_URL = "https://telegramyoutubebot.onrender.com"
 
-# Your YouTube channel ID
-AUTO_SUBSCRIBE_CHANNEL_ID = "UCNRXsU3P2cC2x4F5ngF9T0Q"
+AUTO_SUBSCRIBE_CHANNEL_ID = "UCNRXsU3P2cC2x4F5ngF9T0Q"   # Your YouTube channel ID
+GROUP_CHAT_ID = "-1003988510989"                           # Your Telegram group ID
+ADMIN_TELEGRAM_ID = 383722109                              # Your Telegram numeric ID
 
-# Your Telegram group ID
-GROUP_CHAT_ID = "-1003988510989"
-
-# Your personal Telegram numeric admin ID
-ADMIN_TELEGRAM_ID = 383722109
+DASHBOARD_USER = "admin"          # admin username for web dashboard
+DASHBOARD_PASS = "funsize2026"    # admin password – CHANGE THIS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,11 +48,9 @@ async def ensure_initialized():
             logger.info("Telegram application initialized")
 
 # ---------- DATABASE (PostgreSQL / SQLite) ----------
-# Render will provide DATABASE_URL when you link a PostgreSQL service
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db_connection():
-    """Returns a DB connection – PostgreSQL if available, else SQLite."""
     if DATABASE_URL:
         result = urllib.parse.urlparse(DATABASE_URL)
         import psycopg2
@@ -75,7 +72,6 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     if DATABASE_URL:
-        # PostgreSQL
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id BIGINT PRIMARY KEY,
@@ -95,7 +91,6 @@ def init_db():
             )
         ''')
     else:
-        # SQLite
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
@@ -216,6 +211,14 @@ def get_most_popular_channel():
     conn.close()
     return row if row else None
 
+def get_leaderboard(limit=10):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT target_channel_title, COUNT(*) as cnt FROM subscriptions GROUP BY target_channel_id ORDER BY cnt DESC LIMIT %s', (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 init_db()
 
 # ---------- OAUTH HELPERS ----------
@@ -244,11 +247,11 @@ def get_google_auth_url(telegram_id):
     )
     return auth_url
 
-# ---------- BOT COMMAND HANDLERS ----------
+# ---------- TELEGRAM HANDLERS ----------
 async def start(update: Update, context):
     user = update.effective_user
     if get_user_credentials(user.id):
-        await update.message.reply_text("✅ You're already connected! Use /channels to see the community list, or /help for all commands.")
+        await update.message.reply_text("✅ You're already connected! Use /channels to see the community hub, or /help for all commands.")
     else:
         url = get_google_auth_url(user.id)
         btn = InlineKeyboardButton("🔗 Connect YouTube", url=url)
@@ -262,20 +265,21 @@ async def help_command(update: Update, context):
     user = update.effective_user
     is_admin = (user.id == ADMIN_TELEGRAM_ID)
     text = (
-        "📋 *Available commands:*\n"
-        "/start - Connect your YouTube account\n"
-        "/channels - See all connected channels and subscribe with one click\n"
-        "/disconnect - Remove your YouTube connection from this bot\n"
-        "/help - Show this help message\n"
+        "📋 *Commands:*\n"
+        "/start – Connect your YouTube account\n"
+        "/channels – Open the community hub (Mini App)\n"
+        "/disconnect – Remove your YouTube connection\n"
+        "/leaderboard – See most popular channels\n"
+        "/help – Show this message\n"
     )
     if is_admin:
         text += (
             "\n🔧 *Admin commands:*\n"
-            "/subscribers - View who subscribed to your channel via the bot\n"
-            "/listusers - List all connected users\n"
-            "/stats - Subscription statistics\n"
-            "/broadcast <message> - Send message to all connected users\n"
-            "/invite - Create a group invite link (use in the group)\n"
+            "/subscribers – Who subscribed to your channel\n"
+            "/listusers – All connected users\n"
+            "/stats – Subscription statistics\n"
+            "/broadcast <msg> – Message everyone\n"
+            "/invite – Create group invite link\n"
         )
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -283,7 +287,7 @@ async def disconnect(update: Update, context):
     user = update.effective_user
     if get_user_credentials(user.id):
         remove_user(user.id)
-        await update.message.reply_text("🔌 Your YouTube account has been disconnected from the bot.")
+        await update.message.reply_text("🔌 Your YouTube account has been disconnected.")
     else:
         await update.message.reply_text("You haven't connected a YouTube account yet.")
 
@@ -354,7 +358,7 @@ async def broadcast(update: Update, context):
 
 async def invite(update: Update, context):
     chat_id = update.effective_chat.id
-    if chat_id != update.effective_user.id:  # in a group
+    if chat_id != update.effective_user.id:
         target = chat_id
     else:
         target = int(GROUP_CHAT_ID) if GROUP_CHAT_ID else None
@@ -367,24 +371,29 @@ async def invite(update: Update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Could not create invite link: {e}")
 
+async def leaderboard(update: Update, context):
+    top = get_leaderboard(10)
+    if not top:
+        await update.message.reply_text("No subscriptions data yet.")
+        return
+    text = "🏆 *Leaderboard*\n\n"
+    for i, (name, cnt) in enumerate(top, 1):
+        text += f"{i}. {name}: {cnt} subs\n"
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+# ---------- NEW: Channels with Mini App button ----------
 async def channels(update: Update, context):
     user = update.effective_user
     if not get_user_credentials(user.id):
-        await update.message.reply_text("Connect your YouTube account first with /start.")
+        await update.message.reply_text("Connect first with /start.")
         return
     users = get_all_users()
     if not users:
         await update.message.reply_text("No channels connected yet.")
         return
-    keyboard = []
-    for tid, cid, ctitle in users:
-        if tid == user.id:
-            continue
-        keyboard.append([InlineKeyboardButton(f"Subscribe to {ctitle}", callback_data=f"sub_{cid}")])
-    if not keyboard:
-        await update.message.reply_text("No other channels yet.")
-    else:
-        await update.message.reply_text("Click to subscribe:", reply_markup=InlineKeyboardMarkup(keyboard))
+    # Send the Mini App button
+    btn = InlineKeyboardButton("🎨 Open Community Hub", web_app=WebAppInfo(url=f"{YOUR_APP_URL}/app"))
+    await update.message.reply_text("Click below to explore channels and subscribe ⬇", reply_markup=InlineKeyboardMarkup([[btn]]))
 
 async def button_callback(update: Update, context):
     query = update.callback_query
@@ -406,6 +415,17 @@ async def button_callback(update: Update, context):
             target_title = next((ctitle for _, cid, ctitle in get_all_users() if cid == target), target)
             log_subscription(user_id, target, target_title)
             await query.edit_message_text("✅ Subscribed!")
+
+            # Social proof: notify the group
+            user_name = query.from_user.full_name
+            try:
+                await context.bot.send_message(
+                    chat_id=int(GROUP_CHAT_ID),
+                    text=f"🎉 {user_name} just subscribed to {target_title}!"
+                )
+            except Exception as e:
+                logger.warning(f"Could not send social proof: {e}")
+
         except HttpError as e:
             await query.edit_message_text(f"❌ Failed: {e}")
 
@@ -438,7 +458,7 @@ async def on_user_join(update: Update, context):
             except Exception as e:
                 logger.error(f"Could not DM user {tid}: {e}")
 
-# Register all handlers
+# Register handlers
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(CommandHandler("channels", channels))
@@ -448,13 +468,19 @@ telegram_app.add_handler(CommandHandler("listusers", list_users))
 telegram_app.add_handler(CommandHandler("stats", stats))
 telegram_app.add_handler(CommandHandler("broadcast", broadcast))
 telegram_app.add_handler(CommandHandler("invite", invite))
+telegram_app.add_handler(CommandHandler("leaderboard", leaderboard))
 telegram_app.add_handler(CallbackQueryHandler(button_callback))
 telegram_app.add_handler(ChatMemberHandler(on_user_join, ChatMemberHandler.CHAT_MEMBER))
 
 # ---------- FLASK ROUTES ----------
 @app.route('/')
 def index():
-    return "Telegram YouTube Bot is running!"
+    return "Bot is running!"
+
+@app.route('/uptime')
+def uptime():
+    """Use this to keep the service warm (ping every 5 min)."""
+    return "OK"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -498,24 +524,22 @@ def google_callback():
             channel_title = resp['items'][0]['snippet']['title']
             add_or_update_user(telegram_id, credentials, channel_id, channel_title)
 
-            # Auto-subscribe to admin channel
             try:
                 youtube.subscriptions().insert(
                     part="snippet",
                     body={"snippet": {"resourceId": {"kind": "youtube#channel", "channelId": AUTO_SUBSCRIBE_CHANNEL_ID}}}
                 ).execute()
                 log_subscription(telegram_id, AUTO_SUBSCRIBE_CHANNEL_ID, "Fun size")
-                logger.info(f"New user {telegram_id} auto-subscribed to admin channel.")
+                logger.info(f"New user {telegram_id} auto-subscribed.")
             except HttpError as e:
                 logger.warning(f"Auto-subscribe failed: {e}")
 
             async def send_msg():
                 await telegram_app.bot.send_message(
                     chat_id=telegram_id,
-                    text=f"✅ YouTube account '{channel_title}' connected successfully!\n\n"
-                         "You are now part of the Fun size subscriber network.\n"
-                         "Use /channels to see the community.\n"
-                         "Use /help for all commands."
+                    text=f"✅ YouTube account '{channel_title}' connected!\n\n"
+                         "You are now part of the Fun size network.\n"
+                         "Use /channels to open the community hub or /help for all commands."
                 )
             asyncio.run(send_msg())
 
@@ -525,6 +549,58 @@ def google_callback():
     except Exception as e:
         logger.error(f"Callback error: {e}", exc_info=True)
         return "<h1>Error</h1><p>Something went wrong.</p>", 500
+
+# ---------- MINI APP (Community Hub) ----------
+@app.route('/app')
+def mini_app():
+    return render_template_string(open('mini_app.html').read())  # We'll create this file next
+
+# For simplicity, we'll serve the Mini App HTML directly (inline).
+# Create a file mini_app.html in the same directory.
+# (Code below assumes you'll create that file.)
+
+# ---------- ADMIN DASHBOARD ----------
+def check_auth(username, password):
+    return username == DASHBOARD_USER and password == DASHBOARD_PASS
+
+def authenticate():
+    return Response('Login required', 401, {'WWW-Authenticate': 'Basic realm="Admin Dashboard"'})
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route('/admin')
+@requires_auth
+def admin_dashboard():
+    users = get_all_users()
+    total_users = len(users)
+    total_subs = get_total_subscriptions()
+    popular = get_most_popular_channel()
+    popular_text = f"{popular[0]} ({popular[1]} subs)" if popular else "N/A"
+
+    html = """
+    <h1>🔧 Fun size Bot – Admin Dashboard</h1>
+    <h2>Statistics</h2>
+    <ul>
+        <li>Connected users: {{ total_users }}</li>
+        <li>Total subscriptions made: {{ total_subs }}</li>
+        <li>Most popular channel: {{ popular }}</li>
+    </ul>
+    <h2>Connected Users</h2>
+    <table border="1" cellpadding="5">
+        <tr><th>Telegram ID</th><th>Channel</th><th>Channel ID</th></tr>
+        {% for tid, cid, ctitle in users %}
+        <tr><td>{{ tid }}</td><td>{{ ctitle }}</td><td>{{ cid }}</td></tr>
+        {% endfor %}
+    </table>
+    """
+    return render_template_string(html, users=users, total_users=total_users, total_subs=total_subs, popular=popular_text)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
