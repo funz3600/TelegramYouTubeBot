@@ -553,11 +553,18 @@ def google_callback():
 # ---------- MINI APP (Community Hub) ----------
 @app.route('/app')
 def mini_app():
-    return render_template_string(open('mini_app.html').read())  # We'll create this file next
+    # The HTML file must be in the same directory as app.py
+    with open('mini_app.html', 'r', encoding='utf-8') as f:
+        html = f.read()
+    return html
 
-# For simplicity, we'll serve the Mini App HTML directly (inline).
-# Create a file mini_app.html in the same directory.
-# (Code below assumes you'll create that file.)
+# ---------- API ENDPOINT FOR MINI APP ----------
+@app.route('/api/channels')
+def api_channels():
+    """Return JSON list of all connected channels (without private tokens)."""
+    users = get_all_users()
+    channels = [{"id": cid, "title": ctitle} for _, cid, ctitle in users]
+    return json.dumps(channels)
 
 # ---------- ADMIN DASHBOARD ----------
 def check_auth(username, password):
