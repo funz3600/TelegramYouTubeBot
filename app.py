@@ -1,8 +1,8 @@
 import os
 import logging
 import json
-import sqlite3
 import asyncio
+import urllib.parse
 from datetime import datetime
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -48,53 +48,114 @@ async def ensure_initialized():
             _app_initialized = True
             logger.info("Telegram application initialized")
 
-# ---------- DATABASE ----------
+# ---------- DATABASE (PostgreSQL / SQLite) ----------
+# Render will provide DATABASE_URL when you link a PostgreSQL service
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db_connection():
+    """Returns a DB connection – PostgreSQL if available, else SQLite."""
+    if DATABASE_URL:
+        result = urllib.parse.urlparse(DATABASE_URL)
+        import psycopg2
+        conn = psycopg2.connect(
+            host=result.hostname,
+            port=result.port,
+            dbname=result.path[1:],
+            user=result.username,
+            password=result.password,
+            sslmode='require'
+        )
+        return conn
+    else:
+        import sqlite3
+        conn = sqlite3.connect('users.db', timeout=10)
+        return conn
+
 def init_db():
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
-            youtube_channel_id TEXT,
-            youtube_channel_title TEXT,
-            access_token TEXT,
-            refresh_token TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            subscriber_telegram_id INTEGER,
-            target_channel_id TEXT,
-            target_channel_title TEXT,
-            timestamp TEXT
-        )
-    ''')
+    if DATABASE_URL:
+        # PostgreSQL
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id BIGINT PRIMARY KEY,
+                youtube_channel_id TEXT,
+                youtube_channel_title TEXT,
+                access_token TEXT,
+                refresh_token TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id SERIAL PRIMARY KEY,
+                subscriber_telegram_id BIGINT,
+                target_channel_id TEXT,
+                target_channel_title TEXT,
+                timestamp TEXT
+            )
+        ''')
+    else:
+        # SQLite
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id INTEGER PRIMARY KEY,
+                youtube_channel_id TEXT,
+                youtube_channel_title TEXT,
+                access_token TEXT,
+                refresh_token TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscriber_telegram_id INTEGER,
+                target_channel_id TEXT,
+                target_channel_title TEXT,
+                timestamp TEXT
+            )
+        ''')
     conn.commit()
     conn.close()
 
 def add_or_update_user(telegram_id, credentials, channel_id, channel_title):
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
     creds_json = credentials.to_json()
-    c.execute('''
-        INSERT OR REPLACE INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
+    if DATABASE_URL:
+        c.execute('''
+            INSERT INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                youtube_channel_id = EXCLUDED.youtube_channel_id,
+                youtube_channel_title = EXCLUDED.youtube_channel_title,
+                access_token = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token
+        ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
+    else:
+        c.execute('''
+            INSERT OR REPLACE INTO users (telegram_id, youtube_channel_id, youtube_channel_title, access_token, refresh_token)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (telegram_id, channel_id, channel_title, creds_json, credentials.refresh_token))
     conn.commit()
     conn.close()
 
 def remove_user(telegram_id):
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('DELETE FROM users WHERE telegram_id = ?', (telegram_id,))
+    if DATABASE_URL:
+        c.execute('DELETE FROM users WHERE telegram_id = %s', (telegram_id,))
+    else:
+        c.execute('DELETE FROM users WHERE telegram_id = ?', (telegram_id,))
     conn.commit()
     conn.close()
 
 def get_user_credentials(telegram_id):
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = ?', (telegram_id,))
+    if DATABASE_URL:
+        c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = %s', (telegram_id,))
+    else:
+        c.execute('SELECT access_token, refresh_token FROM users WHERE telegram_id = ?', (telegram_id,))
     row = c.fetchone()
     conn.close()
     if row:
@@ -104,7 +165,7 @@ def get_user_credentials(telegram_id):
     return None
 
 def get_all_users():
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT telegram_id, youtube_channel_id, youtube_channel_title FROM users')
     rows = c.fetchall()
@@ -112,25 +173,35 @@ def get_all_users():
     return rows
 
 def log_subscription(subscriber_telegram_id, target_channel_id, target_channel_title):
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''
-        INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
-        VALUES (?, ?, ?, ?)
-    ''', (subscriber_telegram_id, target_channel_id, target_channel_title, datetime.utcnow().isoformat()))
+    timestamp = datetime.utcnow().isoformat()
+    if DATABASE_URL:
+        c.execute('''
+            INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
+            VALUES (%s, %s, %s, %s)
+        ''', (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp))
+    else:
+        c.execute('''
+            INSERT INTO subscriptions (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp)
+            VALUES (?, ?, ?, ?)
+        ''', (subscriber_telegram_id, target_channel_id, target_channel_title, timestamp))
     conn.commit()
     conn.close()
 
 def get_subscriptions_for_channel(channel_id):
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = ?', (channel_id,))
+    if DATABASE_URL:
+        c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = %s', (channel_id,))
+    else:
+        c.execute('SELECT subscriber_telegram_id FROM subscriptions WHERE target_channel_id = ?', (channel_id,))
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
 
 def get_total_subscriptions():
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM subscriptions')
     count = c.fetchone()[0]
@@ -138,7 +209,7 @@ def get_total_subscriptions():
     return count
 
 def get_most_popular_channel():
-    conn = sqlite3.connect('users.db', timeout=10)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT target_channel_title, COUNT(*) as cnt FROM subscriptions GROUP BY target_channel_id ORDER BY cnt DESC LIMIT 1')
     row = c.fetchone()
