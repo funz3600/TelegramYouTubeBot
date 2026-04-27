@@ -1,95 +1,108 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fun size Community</title>
+    <title>Fun size Community Hub</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: #1a1a2e;
             color: #eee;
             margin: 0;
-            padding: 16px;
+            padding: 20px;
         }
         h2 {
             text-align: center;
             color: #e94560;
+            margin-bottom: 10px;
         }
         .channel-card {
             background: #16213e;
-            border-radius: 12px;
-            padding: 14px;
-            margin: 10px 0;
+            border-radius: 14px;
+            padding: 16px;
+            margin: 12px 0;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         }
         .channel-name {
-            font-size: 16px;
-            flex: 1;
+            font-size: 17px;
+            font-weight: 500;
         }
         button {
             background: #e94560;
             color: white;
             border: none;
-            padding: 10px 18px;
-            border-radius: 20px;
+            padding: 10px 20px;
+            border-radius: 25px;
+            font-size: 14px;
             font-weight: bold;
             cursor: pointer;
+            transition: background 0.3s;
         }
-        button:active { opacity: 0.8; }
+        button:active { background: #c23152; }
         button.subscribed {
             background: #0f3460;
+            cursor: default;
+        }
+        .loading {
+            text-align: center;
+            margin-top: 50px;
+            font-size: 18px;
+            opacity: 0.8;
         }
     </style>
 </head>
 <body>
     <h2>🔥 Fun size Community Hub</h2>
-    <div id="channel-list">Loading...</div>
+    <div id="channel-list" class="loading">Loading channels...</div>
 
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
 
-        // This URL returns JSON with all connected channels
-        const API = '/api/channels';
-
         async function fetchChannels() {
             try {
-                const res = await fetch(API);
+                const res = await fetch('/api/channels');
                 const channels = await res.json();
                 render(channels);
             } catch(e) {
-                document.getElementById('channel-list').innerText = 'Failed to load channels.';
+                document.getElementById('channel-list').innerHTML = '⚠️ Failed to load channels. Ensure you are connected.';
             }
         }
 
         function render(channels) {
+            if (!channels || channels.length === 0) {
+                document.getElementById('channel-list').innerHTML = 'No channels connected yet.';
+                return;
+            }
             let html = '';
             channels.forEach(ch => {
                 html += `
                     <div class="channel-card">
-                        <span class="channel-name">${ch.title}</span>
-                        <button class="${ch.subscribed ? 'subscribed' : ''}"
-                                onclick="subscribe('${ch.id}')">
-                            ${ch.subscribed ? '✓ Subscribed' : 'Subscribe'}
-                        </button>
+                        <span class="channel-name">📺 ${ch.title}</span>
+                        <button id="btn-${ch.id}" onclick="subscribe('${ch.id}')">Subscribe</button>
                     </div>
                 `;
             });
-            document.getElementById('channel-list').innerHTML = html || 'No channels yet.';
+            document.getElementById('channel-list').innerHTML = html;
         }
 
-        async function subscribe(channelId) {
+        function subscribe(channelId) {
             tg.showConfirm(`Subscribe to this channel?`, (confirmed) => {
                 if (confirmed) {
-                    // Send data back to the bot via Telegram WebApp
                     tg.sendData(`sub_${channelId}`);
-                    // Optimistic UI update (button will reflect after actual bot callback fires)
-                    // For now we can just show a brief feedback
-                    tg.showAlert('Subscription request sent!');
+                    // Optimistic UI: mark button as subscribed
+                    const btn = document.getElementById(`btn-${channelId}`);
+                    if (btn) {
+                        btn.className = 'subscribed';
+                        btn.textContent = '✓ Subscribed';
+                        btn.onclick = null;
+                    }
+                    tg.showAlert('Subscription request sent! ✅');
                 }
             });
         }
